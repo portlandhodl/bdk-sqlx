@@ -414,10 +414,9 @@ impl Store<Postgres> {
 
         let spk_cache = &changeset.indexer.spk_cache;
         if !spk_cache.is_empty() {
-            for (desc_id, cache) in spk_cache {
-                let cache_json = serde_json::to_value(cache)?;
-                update_spk_cache(&mut tx, wallet_name, desc_id.0, &cache_json).await?;
-            }
+            // Serialize the entire spk_cache BTree to JSON
+            let spk_cache_json = serde_json::to_value(spk_cache)?;
+            update_spk_cache_all(&mut tx, wallet_name, &spk_cache_json).await?;
         }
 
         local_chain_changeset_persist_to_postgres(&mut tx, wallet_name, &changeset.local_chain)
@@ -485,7 +484,7 @@ async fn insert_network(
     Ok(())
 }
 
-/// Update keychain spk_cache
+/// Update keychain spk_cache for a specific descriptor
 #[tracing::instrument(skip(db_tx, descriptor_id, spk_cache))]
 async fn update_spk_cache(
     db_tx: &mut Transaction<'_, Postgres>,
@@ -507,6 +506,48 @@ async fn update_spk_cache(
             table: "update keychain spk_cache".to_string(),
             source: e,
         })?;
+
+    Ok(())
+}
+
+/// Update spk_cache for all keychains
+#[tracing::instrument(skip(db_tx, spk_cache_json))]
+async fn update_spk_cache_all(
+    db_tx: &mut Transaction<'_, Postgres>,
+    wallet_name: &str,
+    spk_cache_json: &serde_json::Value,
+) -> Result<()> {
+    trace!("update all spk caches");
+
+    // Get all keychains for this wallet
+    let rows = sqlx::query(
+        r#"SELECT keychainkind, descriptor_id FROM "bdk_wallet"."keychain" WHERE wallet_name = $1"#,
+    )
+    .bind(wallet_name)
+    .fetch_all(&mut **db_tx)
+    .await
+    .map_err(|e| BdkSqlxError::QueryError {
+        table: "select keychain".to_string(),
+        source: e,
+    })?;
+
+    // Update each keychain with the full spk_cache JSON
+    for row in rows {
+        let descriptor_id: Vec<u8> = row.get("descriptor_id");
+        
+        sqlx::query(
+            r#"UPDATE "bdk_wallet"."keychain" SET spk_cache = $1 WHERE wallet_name = $2 AND descriptor_id = $3"#,
+        )
+        .bind(spk_cache_json)
+        .bind(wallet_name)
+        .bind(&descriptor_id)
+        .execute(&mut **db_tx)
+        .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "update keychain spk_cache all".to_string(),
+            source: e,
+        })?;
+    }
 
     Ok(())
 }
