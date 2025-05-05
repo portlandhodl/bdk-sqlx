@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS bdk_wallet.keychain (
     descriptor TEXT NOT NULL,
     descriptor_id BYTEA NOT NULL,
     last_revealed INTEGER DEFAULT 0,
+    spk_cache json DEFAULT '{}'::json,
     PRIMARY KEY (wallet_name, keychainkind)
 );
 

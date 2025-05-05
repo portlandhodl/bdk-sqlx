@@ -236,6 +236,7 @@ impl Store<Postgres> {
             descriptor TEXT NOT NULL,
             descriptor_id BYTEA NOT NULL,
             last_revealed INTEGER DEFAULT 0,
+            spk_cache json DEFAULT '{}'::json,
             PRIMARY KEY (wallet_name, keychainkind)
         )"#,
             r#"CREATE TABLE IF NOT EXISTS "bdk_wallet"."block" (
@@ -383,8 +384,9 @@ impl Store<Postgres> {
 
     #[tracing::instrument(skip_all)]
     pub(crate) async fn write(&self, changeset: &ChangeSet) -> Result<()> {
-        trace!("changeset write");
+        trace!("Write Changeset");
         if changeset.is_empty() {
+            trace!("Changeset empty, No changeset written to db.");
             return Ok(());
         }
 
@@ -407,6 +409,14 @@ impl Store<Postgres> {
         if !last_revealed_indices.is_empty() {
             for (desc_id, index) in last_revealed_indices {
                 update_last_revealed(&mut tx, wallet_name, *desc_id, *index).await?;
+            }
+        }
+
+        let spk_cache = &changeset.indexer.spk_cache;
+        if !spk_cache.is_empty() {
+            for (desc_id, cache) in spk_cache {
+                let cache_json = serde_json::to_value(cache)?;
+                update_spk_cache(&mut tx, wallet_name, desc_id.0, &cache_json).await?;
             }
         }
 
@@ -469,6 +479,32 @@ async fn insert_network(
         .await
         .map_err(|e| BdkSqlxError::QueryError {
             table: "insert network".to_string(),
+            source: e,
+        })?;
+
+    Ok(())
+}
+
+/// Update keychain spk_cache
+#[tracing::instrument(skip(db_tx, descriptor_id, spk_cache))]
+async fn update_spk_cache(
+    db_tx: &mut Transaction<'_, Postgres>,
+    wallet_name: &str,
+    descriptor_id: DescriptorId,
+    spk_cache: &serde_json::Value,
+) -> Result<()> {
+    trace!("update spk cache");
+
+    sqlx::query(
+        r#"UPDATE "bdk_wallet"."keychain" SET spk_cache = $1 WHERE wallet_name = $2 AND descriptor_id = $3"#,
+    )
+    .bind(spk_cache)
+    .bind(wallet_name)
+    .bind(descriptor_id.to_byte_array())
+    .execute(&mut **db_tx)
+    .await
+        .map_err(|e| BdkSqlxError::QueryError {
+            table: "update keychain spk_cache".to_string(),
             source: e,
         })?;
 
@@ -759,6 +795,7 @@ pub async fn easy_backup(db: Pool<Postgres>) -> Result<()> {
         descriptor: String,
         descriptor_id: Vec<u8>,
         last_revealed: i32,
+        spk_cache: serde_json::Value,
     }
 
     let results = sqlx::query_as::<_, KeychainEntry>(statement)
