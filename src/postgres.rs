@@ -412,10 +412,42 @@ impl Store<Postgres> {
             }
         }
 
-        let spk_cache = &changeset.indexer.spk_cache;
+        let spk_cache: &std::collections::BTreeMap<(DescriptorId, u32), ScriptBuf> = &changeset.indexer.spk_cache;
         if !spk_cache.is_empty() {
-            // Serialize the entire spk_cache BTree to JSON
-            let spk_cache_json = serde_json::to_value(spk_cache)?;
+            // Transform the BTreeMap into a nested structure where descriptor_id is the key
+            // and the value is a map of u32 -> ScriptBuf
+            let mut transformed_cache = serde_json::Map::new();
+            
+            for ((descriptor_id, index), script_buf) in spk_cache {
+                // Convert descriptor_id to string to use as a key
+                let desc_id_str = descriptor_id.to_string();
+                
+                // Get or create the inner map for this descriptor_id
+                let inner_map = transformed_cache
+                    .entry(desc_id_str)
+                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                
+                // Convert the inner map to a JSON object if it isn't already
+                let inner_obj = match inner_map {
+                    serde_json::Value::Object(obj) => obj,
+                    _ => {
+                        // This should never happen, but just in case
+                        let new_obj = serde_json::Map::new();
+                        *inner_map = serde_json::Value::Object(new_obj);
+                        inner_map.as_object_mut().unwrap()
+                    }
+                };
+                
+                // Add the index -> script_buf mapping to the inner map
+                // Convert index to string and script_buf to hex string
+                inner_obj.insert(
+                    index.to_string(),
+                    serde_json::Value::String(script_buf.to_hex_string()),
+                );
+            }
+            
+            // Convert the transformed structure to a JSON value
+            let spk_cache_json = serde_json::Value::Object(transformed_cache);
             update_spk_cache_all(&mut tx, wallet_name, &spk_cache_json).await?;
         }
 
